@@ -52,6 +52,9 @@ class RoundcubeLogViewer:
         
         # Configure tag colors for the text widget
         self.setup_text_tags()
+        
+        # Define keyword patterns to highlight
+        self.setup_keyword_patterns()
     
     def setup_text_tags(self):
         # Configure text tags for coloring
@@ -61,6 +64,23 @@ class RoundcubeLogViewer:
         self.results_text.tag_configure("header", foreground="green", font=("TkDefaultFont", 10, "bold"))
         self.results_text.tag_configure("success", foreground="green")
         self.results_text.tag_configure("highlight", background="yellow")
+        
+        # Additional tag colors for specific keywords
+        self.results_text.tag_configure("clean_pass", foreground="green", background="#E0FFE0")  # Light green background
+        self.results_text.tag_configure("reject", foreground="red", background="#FFE0E0")  # Light red background
+        self.results_text.tag_configure("blocked", foreground="white", background="#AA0000")  # Dark red background
+        self.results_text.tag_configure("milter_reject", foreground="white", background="#AA5500")  # Dark orange background
+        self.results_text.tag_configure("unknown_user", foreground="white", background="#550000")  # Very dark red
+    
+    def setup_keyword_patterns(self):
+        # Define patterns to match with their corresponding tags
+        self.keyword_patterns = [
+            (r"Passed CLEAN", "clean_pass"),
+            (r"NOQUEUE reject", "reject"),
+            (r"Blocked MTA-BLOCKED", "blocked"),
+            (r"milter-reject", "milter_reject"),
+            (r"User unknown in virtual mailbox table", "unknown_user")
+        ]
     
     def setup_search_tab(self):
         # Email input field
@@ -257,35 +277,46 @@ class RoundcubeLogViewer:
                          args=(email, additional_params), 
                          daemon=True).start()
     
+    def find_keyword_positions(self, line):
+        """Find positions of all keywords in the line."""
+        keyword_positions = []
+        
+        for pattern, tag in self.keyword_patterns:
+            for match in re.finditer(pattern, line):
+                keyword_positions.append((match.start(), match.end(), tag))
+        
+        return keyword_positions
+    
     def apply_color_to_log_line(self, line):
         """Apply appropriate color tags to log lines based on content."""
         # Initialize tags list for this line
-        tags = []
+        base_tags = []
         
         # Convert to lowercase for case-insensitive matching
         lower_line = line.lower()
         
-        # Add appropriate tags based on content
-        if "error" in lower_line or "failed" in lower_line or "failure" in lower_line:
-            tags.append("error")
-        elif "warning" in lower_line or "warn" in lower_line:
-            tags.append("warning")
-        elif "info" in lower_line or "notice" in lower_line:
-            tags.append("info")
-        elif "success" in lower_line or "completed" in lower_line:
-            tags.append("success")
+        # Find keyword positions for special highlighting
+        keyword_positions = self.find_keyword_positions(line)
         
-        # Highlight the email address
+        # Add appropriate base tags based on content
+        if "error" in lower_line or "failed" in lower_line or "failure" in lower_line:
+            base_tags.append("error")
+        elif "warning" in lower_line or "warn" in lower_line:
+            base_tags.append("warning")
+        elif "info" in lower_line or "notice" in lower_line:
+            base_tags.append("info")
+        elif "success" in lower_line or "completed" in lower_line:
+            base_tags.append("success")
+        
+        # Find email position
         email = self.email_var.get().strip()
+        email_pos = None
         if email in line:
-            # Find start and end positions of email in the line
             start_pos = line.find(email)
             end_pos = start_pos + len(email)
-            
-            # Return the line with position information for highlighting
-            return [(line, tags), (start_pos, end_pos)]
+            email_pos = (start_pos, end_pos)
         
-        return [(line, tags), None]
+        return [(line, base_tags), email_pos, keyword_positions]
     
     def _search_logs_thread(self, email, additional_params):
         try:
@@ -334,22 +365,31 @@ class RoundcubeLogViewer:
                 
                 # Process each line and apply appropriate coloring
                 lines = results.splitlines()
-                for line in lines:
+                for i, line in enumerate(lines):
                     if line.strip():
-                        colored_line, highlight_pos = self.apply_color_to_log_line(line)
+                        colored_line, email_pos, keyword_positions = self.apply_color_to_log_line(line)
                         
-                        # Insert the line with its tags
-                        line_text, tags = colored_line
+                        # Insert the line with its base tags
+                        line_text, base_tags = colored_line
                         position = self.results_text.index(tk.END)
-                        self.root.after(0, lambda pos=position, txt=line_text+"\n", tgs=tags: 
+                        self.root.after(0, lambda pos=position, txt=line_text+"\n", tgs=base_tags: 
                                        self.results_text.insert(pos, txt, tgs))
                         
-                        # If email needs highlighting, apply highlight tag
-                        if highlight_pos:
-                            start, end = highlight_pos
-                            line_number = int(float(position)) - 1
+                        # Get the line number for tag positions
+                        line_number = int(float(position)) - 1
+                        
+                        # Apply email highlight tag if email was found
+                        if email_pos:
+                            start, end = email_pos
                             self.root.after(0, lambda ln=line_number, s=start, e=end: 
                                            self.results_text.tag_add("highlight", 
+                                                                   f"{ln}.{s}", 
+                                                                   f"{ln}.{e}"))
+                        
+                        # Apply keyword tags
+                        for start, end, tag in keyword_positions:
+                            self.root.after(0, lambda ln=line_number, s=start, e=end, t=tag: 
+                                           self.results_text.tag_add(t, 
                                                                    f"{ln}.{s}", 
                                                                    f"{ln}.{e}"))
                 
